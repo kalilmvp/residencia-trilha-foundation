@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Private S3 origin, CloudFront with origin access control, an ACM certificate,
+  and Route 53 alias records for the domain and subdomain. Deploy in us-east-1.
+  Do not reuse the bucket name or domain already attached to the console-built
+  distribution.
+
+Rules:
+  RequireUsEast1:
+    Assertions:
+      - Assert: !Equals [!Ref "AWS::Region", "us-east-1"]
+        AssertDescription: CloudFront only accepts an ACM certificate from us-east-1.
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Apex domain, without www. Example residencia.example.com.
+    AllowedPattern: ^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$
+    ConstraintDescription: Must be a DNS name without a scheme or a trailing dot.
+  HostedZoneId:
+    Type: String
+    Description: Public Route 53 hosted zone id (Z..., without the /hostedzone/ prefix).
+    AllowedPattern: ^Z[A-Z0-9]+$
+    ConstraintDescription: Use the id Route 53 shows, not the /hostedzone/Z... API path.
+  BucketName:
+    Type: String
+    Description: Globally unique bucket name. Do not reuse the live site bucket.
+    AllowedPattern: ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$
+    ConstraintDescription: S3 bucket names are lowercase and 3-63 characters.
+  CachePolicyId:
+    Type: String
+    Description: >-
+      Id of the managed cache policy named Managed-CachingOptimized.
+      Look it up at deploy time; do not treat a previously copied id as permanent.
+    AllowedPattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+
+Resources:
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+
+  SiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        Description: !Sub "Signs requests from this stack to ${BucketName}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SiteCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames:
+        - !Sub "www.${DomainName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Sub "www.${DomainName}"
+          HostedZoneId: !Ref HostedZoneId
+
+  SiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        DefaultRootObject: index.html
+        Aliases:
+          - !Ref DomainName
+          - !Sub "www.${DomainName}"
+        Origins:
+          - Id: s3-origin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: s3-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: !Ref CachePolicyId
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        ViewerCertificate:
+          AcmCertificateArn: !Ref SiteCertificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2025
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}"
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  SiteDnsRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      RecordSets:
+        - Name: !Sub "${DomainName}."
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+            EvaluateTargetHealth: false
+        - Name: !Sub "www.${DomainName}."
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+            EvaluateTargetHealth: false
+        - Name: !Sub "${DomainName}."
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+            EvaluateTargetHealth: false
+        - Name: !Sub "www.${DomainName}."
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+            EvaluateTargetHealth: false
+
+Outputs:
+  BucketName:
+    Description: Bucket that receives the Vite build.
+    Value: !Ref SiteBucket
+  DistributionId:
+    Description: Pass this to the CloudFront invalidation in deploy.sh.
+    Value: !Ref SiteDistribution
+  DistributionDomainName:
+    Description: CloudFront domain the alias records target.
+    Value: !GetAtt SiteDistribution.DomainName
+  CertificateArn:
+    Description: ACM certificate attached to the distribution.
+    Value: !Ref SiteCertificate
