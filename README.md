@@ -8,6 +8,10 @@ sem descartar o que já foi construído.
 
 ```text
 residencia-trilha-foundation/
+├── .env.example                       # modelo das variáveis locais; copie para .env
+├── scripts/
+│   ├── deploy.sh                      # build, sync no S3 e invalidação do CloudFront
+│   └── tests/cdn_load/test.sh         # mede X-Cache na URL publicada
 ├── site/                              # SPA React e TypeScript
 ├── backend/
 │   └── lambdas/
@@ -16,6 +20,9 @@ residencia-trilha-foundation/
 │       └── 03-order-processor-lambda/
 └── infrastructure/
     ├── bootstrap.sh                   # aplica um profile
+    ├── cloudformation/
+    │   ├── web-edge.yaml              # a borda da Sprint 1, descrita em CloudFormation
+    │   └── scripts/create-web-edge-changeset.sh
     ├── foundation/terraform-state/    # reservado para o remote state
     ├── profiles/                      # ponto inicial de cada sprint
     └── stacks/                        # root stacks Terraform evolutivas
@@ -29,6 +36,9 @@ residencia-trilha-foundation/
 
 Os diretórios em `infrastructure/stacks` serão root stacks independentes, no
 mesmo padrão da Trilha Professional. Eles ainda não possuem arquivos `.tf`.
+O template em `infrastructure/cloudformation/` é o exercício opcional da
+Sprint 1: a mesma borda, descrita para a AWS guardar o estado na stack. Ele
+não substitui as stacks Terraform, que começam na Sprint 5.
 
 ## Como as sprints, as stacks e o state se relacionam
 
@@ -174,11 +184,76 @@ conexão. Nenhuma mudança na regra de negócio ou nos handlers será necessári
 Consulte [backend/README.md](backend/README.md) para conhecer os packages, os
 handlers e as variáveis de ambiente.
 
-## Build de produção do site
+## Variáveis locais
 
 ```bash
-npm --prefix site run build
+cp .env.example .env
 ```
 
-Os arquivos estáticos serão gerados em `site/dist` e poderão ser enviados para
-o bucket S3 da Sprint 1.
+O `.env` fica de fora do Git. `scripts/deploy.sh` e
+`infrastructure/cloudformation/scripts/create-web-edge-changeset.sh` leem esse
+arquivo.
+
+| Variável | Quem usa | Função |
+| --- | --- | --- |
+| `BUCKET_NAME` | deploy e o change set | Bucket que recebe `site/dist` |
+| `DISTRIBUTION_ID` | deploy | Distribuição que a invalidação deve limpar |
+| `DOMAIN_NAME` | change set | Nome publicado pela distribuição nova |
+| `DNS_NAME` | change set | Zona Route 53 em que o script busca o hosted zone id |
+| `STACK_NAME` | change set | Nome da stack. O padrão está no `.env.example` |
+| `AWS_PROFILE` | change set | Perfil da AWS CLI |
+| `AWS_REGION` | change set | Tem de ser `us-east-1`: o CloudFront só aceita certificado ACM dessa região |
+
+O `.env.example` do `site/` é outro arquivo. Ele guarda `VITE_AUTH_MODE` e as
+variáveis do Cognito, usadas pelo frontend, não pelos scripts de publicação.
+
+## Publicar o site
+
+```bash
+./scripts/deploy.sh
+```
+
+O script gera o build em `site/dist`, envia o conteúdo com
+`aws s3 sync --delete` para `BUCKET_NAME` e pede a invalidação de `/` e
+`/index.html`. O comando termina quando o CloudFront aceita o pedido. A
+invalidação em si continua por alguns minutos.
+
+`DISTRIBUTION_ID` é o da distribuição que já serve o site. Se a publicação for
+para uma stack CloudFormation nova, troque esse valor pela saída `DistributionId`
+dessa stack antes de rodar o deploy.
+
+Para ver o cache na borda:
+
+```bash
+./scripts/tests/cdn_load/test.sh
+```
+
+O teste repete o pedido de `index.html` e de um asset com hash e imprime
+`X-Cache`, `Age` e o tempo de cada resposta. A URL está escrita no script.
+
+## CloudFormation da borda
+
+`infrastructure/cloudformation/web-edge.yaml` descreve bucket privado, origin
+access control, certificado, distribuição e os alias de DNS. Use um bucket e
+um domínio que ainda não pertençam à distribuição criada no console. Um nome
+só pode estar em uma distribuição.
+
+```bash
+./infrastructure/cloudformation/scripts/create-web-edge-changeset.sh
+```
+
+O script lê `DOMAIN_NAME`, `DNS_NAME` e `BUCKET_NAME` do `.env`, busca o id da
+cache policy `Managed-CachingOptimized` e o hosted zone id de `DNS_NAME`, e
+cria o change set. Ele não executa. Revise os recursos no console e só então:
+
+```bash
+aws cloudformation execute-change-set \
+  --stack-name "$STACK_NAME" \
+  --change-set-name NOME_IMPRESSO_PELO_SCRIPT \
+  --region us-east-1 \
+  --profile "$AWS_PROFILE"
+```
+
+Apagar a stack remove a distribuição, o certificado e os registros de DNS. O
+bucket permanece: o template marca esse recurso para retenção, então esvazie e
+apague o bucket à parte quando o exercício acabar.
