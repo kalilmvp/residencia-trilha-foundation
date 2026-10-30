@@ -11,3 +11,4 @@ obj/
 .env.production.local
 .DS_Store
 *.log
+.cursor/rules/aws-senior.mdc

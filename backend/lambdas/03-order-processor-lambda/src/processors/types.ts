@@ -8,6 +8,7 @@ export type OrderEvent = {
   quantity: number;
   occurredAt: string;
   idempotencyKey: string;
+  correlationId?: string;
 };
 
 export type ProcessingResult = {

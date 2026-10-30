@@ -4,6 +4,11 @@ using Amazon.Lambda.Core;
 using Amazon.Lambda.Serialization.SystemTextJson;
 using Amazon.SQS;
 using Amazon.SQS.Model;
+using AWS.Distro.OpenTelemetry.Exporter.Xray.Udp;
+using OpenTelemetry;
+using OpenTelemetry.Instrumentation.AWSLambda;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using Residencia.Foundation.Orders.Data;
 
 [assembly: LambdaSerializer(typeof(DefaultLambdaJsonSerializer))]
@@ -13,6 +18,20 @@ namespace Residencia.Foundation.Orders;
 public sealed class Function
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly TracerProvider TracerProvider = Sdk.CreateTracerProviderBuilder()
+        .AddAWSLambdaConfigurations()
+        .AddAWSInstrumentation()
+        .AddProcessor(
+            new SimpleActivityExportProcessor(
+                new XrayUdpExporter(
+                    ResourceBuilder.CreateDefault()
+                        .AddService(Environment.GetEnvironmentVariable("AWS_LAMBDA_FUNCTION_NAME") ?? "order-backend-api-lambda")
+                        .Build()
+                )
+            )
+        )
+        .SetSampler(new ParentBasedSampler(new AlwaysOnSampler()))
+        .Build();
     private readonly ICommerceRepository _repository;
     private readonly IAmazonSQS _sqs;
     private readonly string _queueUrl;
@@ -34,7 +53,12 @@ public sealed class Function
         _queueUrl = queueUrl;
     }
 
-    public async Task<APIGatewayProxyResponse> FunctionHandler(
+    public Task<APIGatewayProxyResponse> FunctionHandler(
+        APIGatewayProxyRequest request,
+        ILambdaContext context
+    ) => AWSLambdaWrapper.Trace(TracerProvider, HandleRequest, request, context);
+
+    private async Task<APIGatewayProxyResponse> HandleRequest(
         APIGatewayProxyRequest request,
         ILambdaContext context
     )
@@ -47,7 +71,7 @@ public sealed class Function
                 ?? new Dictionary<string, string>();
 
             if (method == "POST" && path == "/orders")
-                return await CreateOrder(request, claims);
+                return await CreateOrder(request, claims, context);
 
             if (method == "GET" && path == "/orders")
                 return await ListBuyerOrders(claims);
@@ -70,7 +94,8 @@ public sealed class Function
 
     private async Task<APIGatewayProxyResponse> CreateOrder(
         APIGatewayProxyRequest request,
-        IDictionary<string, string> claims
+        IDictionary<string, string> claims,
+        ILambdaContext context
     )
     {
         var input = JsonSerializer.Deserialize<CreateOrderRequest>(request.Body ?? "{}", JsonOptions);
@@ -82,6 +107,7 @@ public sealed class Function
         if (product.Stock < input.Quantity) return Json(409, new { message = "Insufficient stock." });
 
         var orderId = Guid.NewGuid().ToString();
+        var correlationId = request.RequestContext.RequestId;
         var createdAt = DateTimeOffset.UtcNow;
         var buyerId = RequiredClaim(claims, "sub");
         var buyerEmail = OptionalClaim(claims, "email");
@@ -97,7 +123,8 @@ public sealed class Function
             createdAt,
             orderId,
             buyerName,
-            buyerEmail
+            buyerEmail,
+            correlationId
         );
         var pendingOrder = new SellerOrder(
             orderEvent.OrderId,
@@ -118,6 +145,12 @@ public sealed class Function
             QueueUrl = _queueUrl,
             MessageBody = JsonSerializer.Serialize(orderEvent, JsonOptions),
         });
+
+        context.Logger.LogLine(JsonSerializer.Serialize(new
+        {
+            correlationId,
+            orderId,
+        }, JsonOptions));
 
         return Json(202, new { orderId, status = "pending", order = pendingOrder });
     }

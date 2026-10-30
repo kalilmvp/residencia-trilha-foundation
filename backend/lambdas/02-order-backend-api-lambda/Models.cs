@@ -25,5 +25,6 @@ public sealed record OrderCreatedEvent(
     DateTimeOffset OccurredAt,
     string IdempotencyKey,
     string? BuyerName = null,
-    string? BuyerEmail = null
+    string? BuyerEmail = null,
+    string? CorrelationId = null
 );
