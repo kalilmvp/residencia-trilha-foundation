@@ -8,5 +8,7 @@ bin/
 obj/
 .env
 .env.local
+.env.production.local
+.cursor/
 .DS_Store
 *.log

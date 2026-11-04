@@ -209,3 +209,125 @@ npm --prefix site run build
 
 Os arquivos estáticos serão gerados em `site/dist` e poderão ser enviados para
 o bucket S3 da Sprint 1.
+
+## Testes realizados: DynamoDB e RDS
+
+Registro da branch `feature/sprint03`, consolidado em **04/11/2026**, na região
+`us-east-1`. Os testes manuais do laboratório foram confrontados com logs do
+CloudWatch, configuração das funções e leitura de um pedido no DynamoDB.
+Esta documentação não executou novas compras nem alterou recursos AWS.
+Todos os horários abaixo estão em **UTC**.
+
+Os eventos selecionados, seus IDs e log streams estão no arquivo de
+[evidências dos adapters](docs/evidencias/data-source-2026-11-04.json).
+O arquivo contém uma amostra rastreável, sem senhas, tokens ou dados pessoais
+dos compradores; não é uma exportação completa dos logs.
+
+### Resultados observados
+
+| Cenário | Resultado | Evidência |
+| --- | --- | --- |
+| `DATA_SOURCE=dynamodb`: processamento de pedido | Confirmado | Evento `order-processed` em 14/10/2026 às 02:05:37.088 e item correspondente consultado com `status=processed` na tabela `residencia-foundation-marketplace`. |
+| `DATA_SOURCE=rds`: processamento e atualização de estoque | Confirmado pelo retorno do adapter após o commit | Em 04/11/2026 às 23:09:36.444, pedido processado com estoque resultante `985`; às 23:12:29.469, outro pedido processado com estoque resultante `0`. |
+| `DATA_SOURCE=rds`: reentrega da mesma mensagem | Duplicidade reconhecida | O mesmo `messageId` e `orderId` retornaram `duplicate` às 23:10:06.084 e 23:10:35.804. |
+| Conectividade RDS Proxy → PostgreSQL | Disponível na inspeção | Target `AVAILABLE`; instância `residencia-marketplace-postgres` disponível, banco inicial `marketplace`, acesso público desabilitado e Single-AZ. |
+
+#### Evidência DynamoDB
+
+Grupo de logs: `/aws/lambda/order-processor-lambda`. Trecho do evento de
+14/10/2026 às 02:05:37.088:
+
+```text
+orderId: '341bc055-0c6b-4847-a22e-4be493058c1f'
+result: {
+  status: 'processed',
+  orderId: '341bc055-0c6b-4847-a22e-4be493058c1f',
+  productId: '7de2a6c2-3cd6-4409-98f7-db5d3eefb071',
+  quantity: 1
+}
+```
+
+A leitura consistente de `ORDER#341bc055-0c6b-4847-a22e-4be493058c1f`
+confirmou `status=processed`, o mesmo produto e quantidade `1`. Isso confirma
+o registro persistido do pedido; não foi capturado um comparativo de estoque
+antes/depois para esse exemplo histórico.
+
+#### Evidência RDS
+
+No mesmo grupo de logs, em 04/11/2026 às 23:09:36.444:
+
+```text
+messageId: '55d2ca72-9dc8-44e5-bb0e-fd1363e81cfc'
+orderId: 'e9defc4d-0250-43a3-a661-c363d966b362'
+result: {
+  status: 'processed',
+  orderId: 'e9defc4d-0250-43a3-a661-c363d966b362',
+  stock: 985
+}
+```
+
+Às 23:10:06.084 e 23:10:35.804, a mesma mensagem retornou:
+
+```text
+result: {
+  status: 'duplicate',
+  orderId: 'e9defc4d-0250-43a3-a661-c363d966b362'
+}
+```
+
+O [adapter RDS](backend/lambdas/03-order-processor-lambda/src/processors/rds-order-processor.ts)
+retorna `stock` após o `COMMIT`. Ao encontrar o pedido já processado, retorna
+`duplicate` antes de executar outra baixa de estoque. Esses registros evidenciam
+o processamento e a proteção contra reentrega naquele cenário; a causa das
+reentregas não foi investigada nesta coleta.
+
+Os logs históricos não incluem o valor de `DATA_SOURCE`. A identificação do
+adapter RDS utiliza o campo `stock` do retorno, específico desse adapter no
+código revisado, e o contexto da correção do deploy. Não foi realizada uma
+consulta SQL independente às linhas do RDS durante a coleta das evidências.
+
+### Problemas encontrados e correções verificadas
+
+1. **Conexão pelo CloudShell antes de o target estar disponível.** A tentativa
+   inicial com `psql` retornou `server closed the connection unexpectedly`.
+   O teste foi repetido após o target do proxy ficar `AVAILABLE`, e a resolução
+   foi confirmada durante o laboratório. Verificar o target, não apenas o
+   status geral do proxy, antes de aplicar o schema.
+
+Não foi necessário adicionar usuário ou senha às variáveis da Lambda.
+O papel de execução já permitia `secretsmanager:GetSecretValue` para o secret
+do banco. `correlationId: undefined` não era a causa da falha de conexão.
+
+### Alternância dos adapters e reprodução
+
+Na coleta de 04/11/2026, o processor já estava novamente com
+`DATA_SOURCE=dynamodb`; sua última atualização registrada era 23:13:47 UTC.
+Esse estado atual não substitui as evidências históricas do teste RDS.
+
+Para repetir a validação, configure **as três Lambdas** para a mesma fonte de
+dados, conforme [backend/README.md](backend/README.md):
+
+- DynamoDB: `DATA_SOURCE=dynamodb` e `MARKETPLACE_TABLE_NAME`.
+- RDS: `DATA_SOURCE=rds`, `DB_HOST` apontando para o RDS Proxy, `DB_PORT=5432`,
+  `DB_NAME=marketplace`, `DB_SECRET_ARN` e `DB_SSL=true`.
+
+Antes da troca, aguarde o processamento das mensagens pendentes e verifique a
+DLQ para evitar consumir eventos de uma base usando o outro adapter. A troca
+de `DATA_SOURCE` não migra produtos ou pedidos entre DynamoDB e PostgreSQL.
+
+1. No modo escolhido, cadastre um produto e anote o estoque inicial.
+2. Faça uma compra e anote o `orderId`.
+3. Confira o pedido como `processed`, o estoque final e o evento correspondente
+   no CloudWatch. Para RDS, use também uma consulta SQL pelo CloudShell na VPC;
+   para DynamoDB, confira os itens `PRODUCT#<id>` e `ORDER#<id>`.
+4. Preserve horário UTC, IDs e resultados para comparar as duas execuções.
+
+Para localizar os registros no CloudWatch Logs Insights, selecione o grupo
+`/aws/lambda/order-processor-lambda` e o intervalo de datas do teste:
+
+```sql
+fields @timestamp, @logStream, @message
+| filter @message like /order-processed|order-processing-failed/
+| sort @timestamp asc
+| limit 200
+```

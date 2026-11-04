@@ -1,0 +1,100 @@
+{
+  "collectedOn": "2026-11-04",
+  "region": "us-east-1",
+  "branch": "feature/sprint03",
+  "scope": "Selected evidence, not a complete log export. No new orders were created for this documentation.",
+  "sources": {
+    "logs": "/aws/lambda/order-processor-lambda",
+    "dynamodbTable": "residencia-foundation-marketplace"
+  },
+  "dynamodb": {
+    "log": {
+      "logStreamName": "2026/10/14/[$LATEST]143c82888e1346648439a77611c67a3c",
+      "timestamp": 1791943537088,
+      "message": "2026-10-14T02:05:37.088Z\tbf011ddd-61ab-5406-9fb0-7e958401ce7d\tINFO\torder-processed {\n  messageId: 'c8b60e31-7a2b-431c-af26-0d7ea86ba3ba',\n  orderId: '341bc055-0c6b-4847-a22e-4be493058c1f',\n  idempotencyKey: '341bc055-0c6b-4847-a22e-4be493058c1f',\n  result: {\n    status: 'processed',\n    orderId: '341bc055-0c6b-4847-a22e-4be493058c1f',\n    productId: '7de2a6c2-3cd6-4409-98f7-db5d3eefb071',\n    quantity: 1\n  }\n}\n",
+      "ingestionTime": 1791943542335,
+      "eventId": "39961676230753197614694588265400702074475093334292430850"
+    },
+    "persistedOrder": {
+      "id": {
+        "S": "341bc055-0c6b-4847-a22e-4be493058c1f"
+      },
+      "quantity": {
+        "N": "1"
+      },
+      "status": {
+        "S": "processed"
+      },
+      "createdAt": {
+        "S": "2026-10-14T02:05:34.0873135+00:00"
+      },
+      "productId": {
+        "S": "7de2a6c2-3cd6-4409-98f7-db5d3eefb071"
+      }
+    }
+  },
+  "rds": {
+    "logs": [
+      {
+        "logStreamName": "2026/11/04/[$LATEST]f6ed43c1438f4ae1b3b9a412e11955ad",
+        "timestamp": 1793833776444,
+        "message": "2026-11-04T23:09:36.444Z\tf5f87790-f5de-5867-b4ac-14f548875fd0\tINFO\torder-processed {\n  messageId: '55d2ca72-9dc8-44e5-bb0e-fd1363e81cfc',\n  orderId: 'e9defc4d-0250-43a3-a661-c363d966b362',\n  idempotencyKey: 'e9defc4d-0250-43a3-a661-c363d966b362',\n  result: {\n    status: 'processed',\n    orderId: 'e9defc4d-0250-43a3-a661-c363d966b362',\n    stock: 985\n  }\n}\n",
+        "ingestionTime": 1793833776625,
+        "eventId": "40003829976995588231930208591397655027134700603638546440"
+      },
+      {
+        "logStreamName": "2026/11/04/[$LATEST]f6ed43c1438f4ae1b3b9a412e11955ad",
+        "timestamp": 1793833806084,
+        "message": "2026-11-04T23:10:06.084Z\taf7c6adf-0ada-5905-b44f-09bab7a79ccf\tINFO\torder-processed {\n  messageId: '55d2ca72-9dc8-44e5-bb0e-fd1363e81cfc',\n  orderId: 'e9defc4d-0250-43a3-a661-c363d966b362',\n  idempotencyKey: 'e9defc4d-0250-43a3-a661-c363d966b362',\n  result: {\n    status: 'duplicate',\n    orderId: 'e9defc4d-0250-43a3-a661-c363d966b362'\n  }\n}\n",
+        "ingestionTime": 1793833806255,
+        "eventId": "40003830637989675916377878542337300058792167141172641799"
+      },
+      {
+        "logStreamName": "2026/11/04/[$LATEST]f6ed43c1438f4ae1b3b9a412e11955ad",
+        "timestamp": 1793833835804,
+        "message": "2026-11-04T23:10:35.804Z\td26e1401-220c-5cbc-95db-77649f9bf6de\tINFO\torder-processed {\n  messageId: '55d2ca72-9dc8-44e5-bb0e-fd1363e81cfc',\n  orderId: 'e9defc4d-0250-43a3-a661-c363d966b362',\n  idempotencyKey: 'e9defc4d-0250-43a3-a661-c363d966b362',\n  result: {\n    status: 'duplicate',\n    orderId: 'e9defc4d-0250-43a3-a661-c363d966b362'\n  }\n}\n",
+        "ingestionTime": 1793833841557,
+        "eventId": "40003831300767823216707998351455931048018306890289250311"
+      },
+      {
+        "logStreamName": "2026/11/04/[$LATEST]f6ed43c1438f4ae1b3b9a412e11955ad",
+        "timestamp": 1793833949469,
+        "message": "2026-11-04T23:12:29.469Z\tfc97e72e-f631-5baa-881d-844b483a3c1d\tINFO\torder-processed {\n  messageId: '862c0f40-c57b-42f8-9592-b9ec7c6b3a05',\n  orderId: 'e11e3a86-7e2b-47cb-85de-d1a752260c73',\n  idempotencyKey: 'e11e3a86-7e2b-47cb-85de-d1a752260c73',\n  result: {\n    status: 'processed',\n    orderId: 'e11e3a86-7e2b-47cb-85de-d1a752260c73',\n    stock: 0\n  }\n}\n",
+        "ingestionTime": 1793833957284,
+        "eventId": "40003833835582026207691277874019201878756948169211445249"
+      }
+    ],
+    "attribution": "The stock field in processed results corresponds to RdsOrderProcessor; the DynamoDB and mock processors return productId and quantity instead.",
+    "database": [
+      {
+        "DBInstanceIdentifier": "residencia-marketplace-postgres",
+        "DBName": "marketplace",
+        "DBInstanceStatus": "available",
+        "EngineVersion": "18.3",
+        "PubliclyAccessible": false,
+        "MultiAZ": false
+      }
+    ],
+    "proxyTargetHealth": [
+      {
+        "resource": "residencia-marketplace-postgres",
+        "health": {
+          "State": "AVAILABLE"
+        }
+      }
+    ]
+  },
+  "processorAtCollection": {
+    "FunctionName": "order-processor-lambda",
+    "CodeSha256": "Wi0ii7DHD5J7w3ds+yukMegM5mymzdQNZmJkf/b+TIQ=",
+    "LastModified": "2026-11-04T23:13:47.000+0000",
+    "LastUpdateStatus": "Successful",
+    "DATA_SOURCE": "dynamodb"
+  },
+  "limitations": [
+    "RDS rows were not queried directly during evidence collection.",
+    "Historical logs do not include DATA_SOURCE; adapter attribution uses result shape, persisted DynamoDB item, and the deployment investigation.",
+    "The DynamoDB example does not include a before/after stock snapshot.",
+    "Duplicate logs establish duplicate handling, not the cause of SQS redelivery."
+  ]
+}
