@@ -331,3 +331,111 @@ fields @timestamp, @logStream, @message
 | sort @timestamp asc
 | limit 200
 ```
+
+## Acesso administrativo ao banco: bastion e Session Manager
+
+Registro da branch `feature/sprint03`, em **08/11/2026 e 09/11/2026 (UTC)**, na
+região `us-east-1`.
+
+### Desafio 1: bastion host com SSH
+
+Um bastion é uma instância numa subnet pública que funciona como único ponto de
+entrada para recursos em subnets privadas. Foi usado para executar `psql` contra
+o endpoint privado do RDS Proxy sem tornar o banco público.
+
+| Recurso | Configuração |
+| --- | --- |
+| Subnet `residencia-public-bastion-a` | `10.0.0.128/27`, `us-east-1a` |
+| Internet Gateway `internet-gateway-bastion` | Anexado à `residencia-marketplace-vpc` |
+| Route table `residencia-public-rt` | `0.0.0.0/0 → IGW`, associada **somente** à subnet do bastion |
+| EC2 `residencia-bastion-2` | `t3.micro`, Amazon Linux 2023, IPv4 público, IMDSv2 obrigatório |
+| `residencia-bastion-sg` | Inbound SSH 22 apenas do IP do aluno em `/32` |
+| `residencia-proxy-sg` | Inbound TCP 5432 com origem no SG do bastion (sem CIDR) |
+
+As subnets das Lambdas e do banco continuaram associadas à
+`residencia-private-rt`, sem rota para o Internet Gateway.
+
+### Desafio 2: Session Manager no lugar do SSH
+
+A instância virou managed instance do Systems Manager:
+
+1. O SSM Agent já vem no Amazon Linux 2023 (versão `3.3.5708.0`).
+2. Instance profile `residencia-bastion-ssm-role` com
+   `AmazonSSMManagedInstanceCore`.
+3. Sessão testada pelo console **antes** de remover a regra de SSH; depois, o
+   inbound do `residencia-bastion-sg` ficou vazio.
+4. Túnel aberto na máquina local com o Session Manager plugin:
+
+```bash
+aws ssm start-session --region us-east-1 \
+  --target <instance-id> \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters '{"host":["<endpoint-do-rds-proxy>"],"portNumber":["5432"],"localPortNumber":["15432"]}'
+```
+
+5. Com a sessão aberta, o `psql` local conectou em `127.0.0.1:15432`. Sem
+   Homebrew, o cliente foi executado via Docker:
+
+```bash
+docker run --rm -it postgres:16 \
+  psql "host=host.docker.internal port=15432 dbname=marketplace user=<usuario> sslmode=require"
+```
+
+Use `sslmode=require`: o proxy exige TLS, e `verify-full` falharia porque o
+certificado é emitido para o nome do proxy, não para `127.0.0.1`.
+
+#### Observação: DHMC
+
+A conta já tinha o Default Host Management Configuration ativado por um Quick
+Setup. Por isso a instância aparecia `Online` no Systems Manager antes mesmo do
+instance profile, e o SSM continuou reportando o role do DHMC
+(`AWS-QuickSetup-SSM-DefaultEC2MgmtRole-us-east-1`) após a associação e o
+restart do agente. O túnel funcionou nos dois casos.
+
+### Por que o port forwarding reduz a superfície de ataque
+
+| | Porta 22 pública | Port forwarding do Session Manager |
+| --- | --- | --- |
+| Porta de entrada | sshd exposto à internet, sujeito a varredura e força bruta | Nenhuma; o agente abre conexões **de saída** em HTTPS 443 |
+| Autenticação | Chave `.pem` estática, copiável | IAM (`ssm:StartSession`), com MFA e revogação imediata |
+| Escopo | Shell completo na instância | Apenas o host e a porta definidos no documento |
+| Auditoria | Logs locais, apagáveis por um invasor | Cada sessão registrada no CloudTrail |
+| Exposição de rede | Exige IP público | IP público dispensável com Interface endpoints (`ssm`, `ssmmessages`, `ec2messages`) ou NAT |
+
+O bastion com SSH também acrescenta custo e risco operacional: IPv4 público
+cobrado, patching do SO, rotação de chaves, atualização do `/32` quando o IP
+muda e o risco de a regra virar `0.0.0.0/0` "temporariamente".
+
+## Remoção dos recursos da Sprint 3
+
+Executada em **09/11/2026 (UTC)** após a coleta das evidências. Somente os
+recursos criados nesta sprint foram removidos, na ordem abaixo, porque a VPC só
+pode ser excluída quando não resta nenhuma ENI nela.
+
+1. **Lambdas** (`catalog-backend-api-lambda`, `order-backend-api-lambda`,
+   `order-processor-lambda`): desanexadas da VPC e variáveis `DB_*` removidas;
+   `DATA_SOURCE=dynamodb` mantido. Nos roles, removido o statement
+   `secretsmanager:GetSecretValue` e desanexada a
+   `AWSLambdaVPCAccessExecutionRole`.
+2. **Bastion**: EC2 terminada; role e instance profile
+   `residencia-bastion-ssm-role` e key pair `residencia-bastion-key-pair`
+   excluídos, inclusive o `.pem` local.
+3. **RDS Proxy** `residencia-marketplace-proxy`, seu endpoint interno, o role
+   `residencia-rds-proxy-role` e o log group do proxy.
+4. **RDS** `residencia-marketplace-postgres`, sem snapshot final nem backups
+   retidos. O secret `rds!db-…`, gerenciado pelo RDS, foi removido junto.
+   Excluídos também o subnet group `residencia-marketplace-db-subnets` e o log
+   group `RDSOSMetrics`.
+5. **VPC endpoints**: Interface (SQS e Secrets Manager) e Gateway (S3 e
+   DynamoDB).
+6. **Rede**: security groups `residencia-lambda-sg`, `residencia-proxy-sg`,
+   `residencia-rds-sg`, `residencia-endpoints-sg` e `residencia-bastion-sg`;
+   três subnets; route tables `residencia-private-rt` e `residencia-public-rt`;
+   Internet Gateway; e a `residencia-marketplace-vpc`.
+
+A verificação final não encontrou instância, banco, proxy, snapshot, secret,
+endpoint, Elastic IP ou VPC remanescente da sprint. O site foi testado após a
+remoção e continuou funcionando com DynamoDB.
+
+Permaneceram os recursos da Sprint 2 (Lambdas, DynamoDB, SQS, API Gateway,
+Cognito, S3 e CloudFront) e o Quick Setup do SSM, anterior à trilha.
