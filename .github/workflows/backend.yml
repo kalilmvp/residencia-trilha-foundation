@@ -16,7 +16,8 @@ concurrency:
 jobs:
   build:
     name: Build
-    runs-on: ubuntu-latest
+    # ponytail: pinned because postgresql-16 isn't in Ubuntu 26.04 repos; switch to the PGDG apt repo before 24.04 runners are retired
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
