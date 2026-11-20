@@ -31,6 +31,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
     try {
       const order = parseOrder(record);
       const result = await processor.process(order);
+      console.info("order-processed data for CI/CD updated");
       console.info("order-processed", {
         messageId: record.messageId,
         orderId: order.orderId,

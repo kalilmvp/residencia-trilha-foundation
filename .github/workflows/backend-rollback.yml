@@ -1,0 +1,126 @@
+# Rollback manual do backend: republica os ZIPs de um run anterior, sem rebuild.
+# Informe o run ID do workflow Backend que gerou a release boa e o SHA esperado.
+name: Backend Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID do workflow Backend com a release conhecida'
+        required: true
+      expected_sha:
+        description: 'SHA completo (40 caracteres) do commit dessa release'
+        required: true
+
+permissions:
+  contents: read
+
+# Mesmo grupo do deploy normal: rollback e deploy nunca rodam ao mesmo tempo.
+concurrency:
+  group: backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback
+    if: github.ref == 'refs/heads/main'
+    environment: prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      actions: read
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      # função:pacote, na mesma ordem do deploy normal
+      TARGETS: >-
+        ${{ vars.CATALOG_FUNCTION }}:catalog.zip
+        ${{ vars.ORDER_API_FUNCTION }}:orders.zip
+        ${{ vars.ORDER_PROCESSOR_FUNCTION }}:processor.zip
+      GH_TOKEN: ${{ github.token }}
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Validar entradas e run de origem
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::run_id inválido"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::expected_sha deve ter 40 caracteres hexadecimais"; exit 1; }
+          read -r workflow branch head_sha conclusion < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
+            --jq '[.path, .head_branch, .head_sha, .conclusion] | @tsv')
+          echo "Run $RUN_ID: $workflow, branch=$branch, sha=$head_sha, conclusion=$conclusion"
+          [[ "$workflow" == ".github/workflows/backend.yml" ]] || { echo "::error::O run não é do workflow Backend"; exit 1; }
+          [[ "$branch" == "main" ]] || { echo "::error::O run não é da main"; exit 1; }
+          [[ "$head_sha" == "$EXPECTED_SHA" ]] || { echo "::error::SHA do run ($head_sha) difere do esperado"; exit 1; }
+          [[ "$conclusion" == "success" ]] || { echo "::error::O run de origem não terminou com sucesso"; exit 1; }
+
+      - name: Baixar artefato original
+        uses: actions/download-artifact@v4
+        with:
+          name: backend
+          path: release
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validar manifesto e hashes do artefato
+        run: |
+          set -euo pipefail
+          manifest_sha=$(jq -r '.sha' release/manifest.json)
+          [[ "$manifest_sha" == "$EXPECTED_SHA" ]] || { echo "::error::Manifesto é do commit $manifest_sha"; exit 1; }
+          for package in catalog.zip orders.zip processor.zip; do
+            expected=$(jq -r --arg file "$package" '.files[$file]' release/manifest.json)
+            actual=$(openssl dgst -sha256 -binary "release/$package" | openssl base64 -A)
+            [[ "$actual" == "$expected" ]] || { echo "::error::Hash de $package não confere com o manifesto"; exit 1; }
+            echo "Pacote verificado: $package $actual"
+          done
+
+      - name: Autenticar na AWS usando OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.BACKEND_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: backend-rollback-${{ github.run_id }}
+
+      - name: Evidência - versão antes
+        run: |
+          set -euo pipefail
+          for entry in $TARGETS; do
+            function_name="${entry%:*}"
+            echo "$function_name $(aws lambda get-function-configuration --function-name "$function_name" --query CodeSha256 --output text)" | tee -a before.txt
+          done
+
+      - name: Republicar pacotes nas Lambdas
+        run: |
+          set -euo pipefail
+          for entry in $TARGETS; do
+            function_name="${entry%:*}"
+            package="${entry##*:}"
+            aws lambda update-function-code \
+              --function-name "$function_name" \
+              --zip-file "fileb://release/$package" \
+              --query '{FunctionName:FunctionName,LastUpdateStatus:LastUpdateStatus}' --output json
+            aws lambda wait function-updated-v2 --function-name "$function_name"
+          done
+
+      - name: Evidência - versão depois
+        run: |
+          set -euo pipefail
+          {
+            echo "## Rollback do backend para \`$EXPECTED_SHA\` (run $RUN_ID)"
+            echo "| Função | CodeSha256 antes | CodeSha256 depois | Manifesto |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for entry in $TARGETS; do
+            function_name="${entry%:*}"
+            package="${entry##*:}"
+            expected=$(jq -r --arg file "$package" '.files[$file]' release/manifest.json)
+            before=$(awk -v f="$function_name" '$1 == f {print $2}' before.txt)
+            after=$(aws lambda get-function-configuration --function-name "$function_name" --query CodeSha256 --output text)
+            echo "| $function_name | \`$before\` | \`$after\` | \`$expected\` |" >> "$GITHUB_STEP_SUMMARY"
+            [[ "$after" == "$expected" ]] || { echo "::error::$function_name não está com o pacote do rollback"; exit 1; }
+            echo "Rollback verificado: $function_name $after"
+          done
