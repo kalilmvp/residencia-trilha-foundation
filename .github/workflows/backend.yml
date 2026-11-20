@@ -65,6 +65,7 @@ jobs:
     name: Deploy
     needs: build
     if: github.ref == 'refs/heads/main'
+    environment: prod
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

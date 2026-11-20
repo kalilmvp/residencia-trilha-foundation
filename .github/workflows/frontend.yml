@@ -62,6 +62,7 @@ jobs:
     needs: build
     # A execução manual também deve selecionar a main, conforme a trust policy.
     if: github.ref == 'refs/heads/main'
+    environment: prod
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
