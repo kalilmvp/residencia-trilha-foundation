@@ -55,7 +55,8 @@ jobs:
           name: frontend
           path: site/dist/
           if-no-files-found: error
-          retention-days: 14
+          # Máximo em repositório público: mantém releases disponíveis para o rollback.
+          retention-days: 90
 
   deploy:
     name: Deploy
