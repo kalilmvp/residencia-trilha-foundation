@@ -1,0 +1,100 @@
+# Rollback manual do frontend: republica o artefato de um run anterior, sem rebuild.
+# Informe o run ID do workflow Frontend que gerou a release boa e o SHA esperado.
+name: Frontend Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID do workflow Frontend com a release conhecida'
+        required: true
+      expected_sha:
+        description: 'SHA completo (40 caracteres) do commit dessa release'
+        required: true
+
+permissions:
+  contents: read
+
+# Mesmo grupo do deploy normal: rollback e deploy nunca rodam ao mesmo tempo.
+concurrency:
+  group: frontend-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Rollback
+    if: github.ref == 'refs/heads/main'
+    environment: prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      actions: read
+    env:
+      RUN_ID: ${{ inputs.run_id }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      FRONTEND_BUCKET: ${{ vars.FRONTEND_BUCKET }}
+      DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+      FRONTEND_URL: ${{ vars.FRONTEND_URL }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Validar entradas e run de origem
+        run: |
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::run_id inválido"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::expected_sha deve ter 40 caracteres hexadecimais"; exit 1; }
+          read -r workflow branch head_sha conclusion < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
+            --jq '[.path, .head_branch, .head_sha, .conclusion] | @tsv')
+          echo "Run $RUN_ID: $workflow, branch=$branch, sha=$head_sha, conclusion=$conclusion"
+          [[ "$workflow" == ".github/workflows/frontend.yml" ]] || { echo "::error::O run não é do workflow Frontend"; exit 1; }
+          [[ "$branch" == "main" ]] || { echo "::error::O run não é da main"; exit 1; }
+          [[ "$head_sha" == "$EXPECTED_SHA" ]] || { echo "::error::SHA do run ($head_sha) difere do esperado"; exit 1; }
+          [[ "$conclusion" == "success" ]] || { echo "::error::O run de origem não terminou com sucesso"; exit 1; }
+
+      - name: Baixar artefato original
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend
+          path: dist
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Validar SHA do artefato
+        run: |
+          node -e 'const r=JSON.parse(require("fs").readFileSync("dist/release.json","utf8")); if(r.sha!==process.env.EXPECTED_SHA||String(r.run)!==process.env.RUN_ID) throw new Error(`Artefato não corresponde: ${JSON.stringify(r)}`); console.log("Artefato verificado:",r)'
+          find dist -type f -exec sha256sum {} + | sort -k2 > artifact-sha256.txt
+          echo "SHA-256 dos arquivos do artefato:"; cat artifact-sha256.txt
+
+      - name: Evidência - versão antes
+        run: |
+          echo "Versão publicada ANTES do rollback:"
+          curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/release.json" | tee before-release.json; echo
+
+      - name: Autenticar na AWS usando OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: frontend-rollback-${{ github.run_id }}
+
+      - name: Republicar artefato no S3
+        run: aws s3 sync dist/ "s3://$FRONTEND_BUCKET/" --cache-control 'no-cache'
+
+      - name: Invalidar cache do CloudFront
+        run: |
+          invalidation_id=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" --paths '/*' --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DISTRIBUTION_ID" --id "$invalidation_id"
+
+      - name: Evidência - versão depois
+        run: |
+          curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/" -o /dev/null
+          curl --fail --silent --show-error --retry 3 "${FRONTEND_URL%/}/release.json" -o after-release.json
+          echo "Versão publicada DEPOIS do rollback:"; cat after-release.json; echo
+          node -e 'const r=JSON.parse(require("fs").readFileSync("after-release.json","utf8")); if(r.sha!==process.env.EXPECTED_SHA) throw new Error("A versão publicada não é a do rollback"); console.log("Rollback verificado:",r.sha)'
+          {
+            echo "## Rollback do frontend"
+            echo "| | release.json |"
+            echo "|---|---|"
+            echo "| Antes | \`$(cat before-release.json)\` |"
+            echo "| Depois | \`$(cat after-release.json)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
